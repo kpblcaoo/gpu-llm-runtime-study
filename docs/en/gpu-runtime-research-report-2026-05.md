@@ -1,8 +1,17 @@
-# GPU Runtime Research Report (May 2026)
+# GPU Runtime Research Report
+
+**Topic:** RTX 6000 Ada vs RTX 5090 for long-context LLM inference
+**Research window:** May 2026
+**Author:** Mikhail Stepanov
+**Status:** technical research report
+**Stack:** `llama.cpp` + `LiteLLM` + `Prometheus/DCGM` on Vast.ai
+**Documentation license:** CC BY 4.0
+
+---
 
 ## 1. Document status and scope
 
-This is a full research artifact. A separate executive summary can be derived from it.
+This is a full technical research report. A separate executive summary can be derived from it.
 
 This report consolidates the May 2026 GPU runtime tests for OpenAI-compatible llama.cpp endpoints behind LiteLLM on rented Vast.ai GPUs. It covers RTX 6000 Ada, RTX 5090, and exploratory dual RTX 5090 configurations using Qwen3.6 27B UD GGUF profiles, primarily `Qwen3.6-27B-UD-Q4_K_XL.gguf` and `Qwen3.6-27B-UD-Q6_K_XL.gguf`, with emphasis on runtime behavior, context capacity, latency, VRAM, power, telemetry coverage, and agent-workload completion.
 
@@ -69,6 +78,8 @@ Metrics were exported in two forms:
 - **PromQL range exports** as per-metric JSON files (`rtx-5090/metrics/*.json`, source repo) for offline analysis.
 
 See `data/metrics_index.md` for the full metric catalogue and DCGM relabelling map.
+
+Node Exporter metrics (`node_cpu_seconds_total`, `node_load1`, `node_load5`, `node_load15`, `node_memory_*`, `node_disk_*`, `node_network_*`) were also available for host-level validation. These were used to check whether inference results were affected by host-side CPU, RAM, disk, or network pressure; full findings are in Section 13.7.
 
 ### 5.2 Coverage by run
 
@@ -545,7 +556,7 @@ The harness used 1 warmup request (`WARMUP=1`), 3 measured repeats, and `max_tok
 
 ![Figure 10.1: Dual RTX 5090 routing exploratory latency](../../charts/dual-5090-routing-exploratory.png)
 
-**Figure 10.1: Dual RTX 5090 topology probe, warm p50 vs cold-backend tails.** Source: `normalized-results.md` Table 1 and `dual-rtx-5090/report-draft.md`. Supports: the dual 5090 topology produced client-side timing data with sharp divergence between warm-cache p50 and cold-backend tail latency. Caveat: no DCGM, no TTFT, no per-row success counts, and invalid llama.cpp metrics for this run; use only as exploratory topology evidence.
+**Figure 10.1: Dual RTX 5090 topology probe, warm p50 vs cold-backend tails.** Source: `normalized-results.md` Table 1 and private dual-run artifacts. Supports: the dual 5090 topology produced client-side timing data with sharp divergence between warm-cache p50 and cold-backend tail latency. Caveat: no DCGM, no TTFT, no per-request route attribution, and invalid llama.cpp metrics for this run; use only as exploratory topology evidence.
 
 ### 10.5 Warmup asymmetry
 
@@ -563,13 +574,14 @@ It is critical to distinguish the steady-state warm-cache behavior from the cold
 - **Unreachable backend metrics**: `llama.cpp` metrics exist in the TSDB for the scrape window, but all series return `NaN` (suspected backend connectivity issue during the 13:54–15:13Z scrape window).
 - **Missing LiteLLM latency and TTFT data**: No `litellm_latency_p95` or `litellm_llm_api_time_to_first_token_metric_bucket` data is available in the TSDB for the dual-5090 run. 
 - **Routing-layer blind spot**: Because a cold backend accepts a request without queuing it, `llama_requests_deferred` would read `0` on the cold backend, while the client experiences a 70–134s latency delay. The deferred metric completely fails to surface this cross-backend routing imbalance.
-- **Zero LiteLLM inference failures**: Despite the latency variance and missing telemetry, LiteLLM confirmed zero inference failures for the dual-5090 test session.
+- **Request completion evidence**: Private curl metric artifacts for the stored c4/c6 dual-5090 benchmark requests show HTTP 200 responses and empty curl error files. This confirms request completion for those stored rows, but it does not provide per-request backend attribution.
 
 ### 10.8 What this topology probe shows
 
 - The topology served client benchmark requests through one OpenAI-compatible endpoint backed by two independent `llama.cpp` backends on the same instance.
+- Private run artifacts show both backends were configured separately (`CUDA_VISIBLE_DEVICES=0` on port 18001 and `CUDA_VISIBLE_DEVICES=1` on port 18002), and inline `nvidia-smi` samples show both GPUs reached high utilization during concurrent phases. This supports functional use of both backends at the batch level.
 - Warm-cache client-side timings were very fast in some batches, especially after both backends had seen large prompts.
-- All characterization is from client-side timings only. The run does not prove reliable routing balance, backend-level capacity, or production-ready multi-GPU behavior because route attribution, DCGM exports, LiteLLM TTFT, per-row success counts, and valid llama.cpp metrics were missing or incomplete.
+- All characterization is from client-side timings and coarse GPU samples only. The run does not prove reliable routing balance, backend-level capacity, or production-ready multi-GPU behavior because route attribution, DCGM exports, LiteLLM TTFT, and valid llama.cpp metrics were missing or incomplete.
 
 ### 10.9 What this does not prove
 
@@ -815,6 +827,26 @@ Stats computed from active-inference samples only (GPU util > 0) except where no
 
 Full per-metric discussion and cross-metric interpretations: `data/prometheus-observability-analysis.md`.
 
+### 13.7 Host-level platform resource findings
+
+In addition to GPU/DCGM telemetry, standard Node Exporter metrics were available for host-level validation. These metrics were used to check whether the observed inference behavior was affected by host-side CPU, RAM, disk, or network pressure.
+
+During active RTX 5090 inference windows, `node_load1` stayed roughly around `0.5–1.0` on a host with 72 logical CPUs, indicating that CPU pressure was negligible for the measured llama.cpp + LiteLLM benchmark path. The Ada 6000 window also showed low sustained CPU pressure.
+
+System memory remained in a safe range. The RTX 5090 host had approximately 64 GiB of RAM, with estimated used memory staying roughly around `10–18 GiB` during active benchmark windows. The Ada 6000 host showed higher absolute RAM use, roughly around `20–31 GiB`, on a larger-memory host. Since model weights and KV cache were resident in GPU VRAM, system RAM was primarily used by the OS, LiteLLM, exporters, logs, and small buffers — well below capacity in both cases.
+
+Disk I/O was near zero during steady-state token generation, with only short write/read spikes related to logging, metrics, and startup activity. No sustained disk pressure was visible during inference windows.
+
+Network counters were available, but the benchmark client, LiteLLM, and llama.cpp ran on the same host. External network throughput, remote-client latency, TLS/API gateway overhead, and production ingress behavior were not meaningfully tested.
+
+No cAdvisor or full `container_*` metrics were collected, so the study does not provide per-container CPU, RAM, filesystem, or network attribution.
+
+![Figure 13.1: Grafana host and GPU telemetry snapshots](../../charts/grafana-host-gpu-telemetry-snapshots.png)
+
+**Figure 13.1: Grafana snapshots for representative Ada 6000 and RTX 5090 benchmark windows.** GPU utilization, VRAM, power, and temperature show active inference load. Node Exporter panels show that host CPU, RAM, disk, and network were not sustained bottlenecks. Screenshots are illustrative; numeric conclusions are based on exported metrics and normalized summaries.
+
+Overall, host-level telemetry showed no evidence that CPU, RAM, disk, or network resources were bottlenecks in the measured benchmark workloads. The dominant constraints remained GPU-side and runtime-side: VRAM capacity, context size, GPU utilization, latency, routing behavior, and model/profile selection.
+
 ---
 
 ## 14. Cross-GPU interpretation
@@ -901,7 +933,7 @@ The operational conclusion is to run a heterogeneous endpoint pool rather than f
 | long-context agent endpoint | Ada A6000 | Q4_K_XL, `400k / 2`, 200k per slot | Section 8.3 and Section 11.3 show D-heavy improved from 919.4s at Ada `200k / 2` to 167.7s at Ada `400k / 2`; VRAM max was 36,180 MiB with meaningful headroom. | The D-heavy delta reflects execution path and context pressure, not raw inference speedup. |
 | aggressive huge-context endpoint | Ada A6000 | Q4_K_XL, `524288 / 2`, ~262k per slot | Section 8.4 shows successful synthetic rows through 250k c2 with wall p50 76.620s and VRAM max 41,434 MiB. | Section 8.4 says this is aggressive mode with only ~7 GiB DCGM-confirmed free VRAM; use selectively. |
 | selective Q6 experiment | Ada A6000 | Q6_K_XL, `400k / 2` | Sections 8.5 and 12.6 show Q6 completed tested synthetic and agent workloads without reported crash or OOM. | Sections 12.3-12.7 show slower latency, +7,124 MiB VRAM, incomplete Q6 scenario coverage, and no quality proof; not default. |
-| exploratory dual-backend topology probe | 2x RTX 5090 | Two Q4_K_XL `200k / 2` backends behind LiteLLM least-busy routing | Section 10.8 reports client-side timings from traffic sent through two independent backends; Section 10.4 shows fast warm-cache p50 cases. | No DCGM, no TTFT, no per-row success counts, invalid llama.cpp metrics; Sections 10.5-10.7 and 13.2 show warmup asymmetry, 70-134s cold-backend tails, missing telemetry, and a deferred-metric blind spot. |
+| exploratory dual-backend topology probe | 2x RTX 5090 | Two Q4_K_XL `200k / 2` backends behind LiteLLM least-busy routing | Section 10.8 reports client-side timings from traffic sent through two independent backends; Section 10.4 shows fast warm-cache p50 cases. | No DCGM, no TTFT, no per-request route attribution, invalid llama.cpp metrics; Sections 10.5-10.7 and 13.2 show warmup asymmetry, 70-134s cold-backend tails, missing telemetry, and a deferred-metric blind spot. |
 
 ### 15.2 Routing policy implied by the evidence
 
@@ -965,7 +997,7 @@ The following figures add qualitative visual evidence for how backend request lo
 
 ## 16. Limitations
 
-This report is a preliminary engineering research artifact, not a formal academic benchmark. The results are still useful because they are tied to named runs, artifacts, and metric sources, but the conclusions should be read as operational guidance for the tested stack rather than universal claims about all GPU serving configurations.
+This report is a technical engineering research report, not a formal academic benchmark. The results are tied to named runs, artifacts, and metric sources, but the conclusions should be read as operational guidance for the tested stack rather than universal claims about all GPU serving configurations.
 
 ### 16.1 Scope limitations
 
@@ -981,6 +1013,8 @@ No formal cost/performance model is included. The report deliberately avoids ren
 
 No production multi-user load test was performed. The synthetic runs cover specific prompt sizes and client concurrency labels; the agent runs cover controlled OpenCode scenarios. They do not model a long-lived multi-tenant service with heterogeneous users, bursty arrivals, cross-region network effects, admission control, quota behavior, or 24/7 thermal cycling.
 
+Host-level Node Exporter metrics were available and showed no CPU/RAM/disk bottleneck during the measured inference windows (Section 13.7). However, this was not a full production platform load test: no cAdvisor or container-level attribution, no external multi-user traffic, no RAG/vector DB workload, no API gateway or auth layer overhead, and no long-duration soak test.
+
 ### 16.2 Measurement limitations
 
 Warm and cache effects materially affect the results. Several fast dual-5090 rows reflect warm KV cache behavior, while the same topology produced 70-134s tails when a cold backend received a large request. This means warm-cache p50 results and cold-prefill tail results must not be averaged into a single simple capacity number.
@@ -993,7 +1027,7 @@ Repeat counts are limited. Synthetic benchmark cells generally use one warmup an
 
 Agent workloads are mostly single-run and path-dependent. OpenCode scenarios include tool calls, file reads, shell commands, retries, prompt growth, and model-dependent execution paths. A faster wall time can reflect better cache fit, fewer retries, a different tool path, or faster inference. This is why agent results support operational viability and directional comparison, but not reproducible speedup ratios or model-quality claims.
 
-The dual RTX 5090 run is exploratory. It provides client-side timing observations for a routed topology and shows warm-cache behavior, but it is sensitive to warmup asymmetry and cache placement. The dual run also lacks complete DCGM, LiteLLM TTFT, per-row success counts, and valid llama.cpp metrics. It should be treated as an exploratory topology probe and diagnostic target, not as routing proof or a final capacity baseline.
+The dual RTX 5090 run is exploratory. It provides client-side timing observations for a routed topology, shows warm-cache behavior, and private artifacts confirm HTTP 200 completion for stored c4/c6 request rows. The run is still sensitive to warmup asymmetry and cache placement, and it lacks complete DCGM, LiteLLM TTFT, per-request route attribution, and valid llama.cpp metrics. It should be treated as an exploratory topology probe and diagnostic target, not as routing-balance proof or a final capacity baseline.
 
 ### 16.3 Validity of conclusions
 
@@ -1161,7 +1195,7 @@ Full table in `normalized-results.md` Table 1. Key confirmed data per hardware g
 | 32k | 6 | 14.25 | — | over-saturation |
 | 95k | 6 | 7.42 | 74.53 | p50 warm steady-state; p95 tail from cold batch 1 |
 
-*No DCGM, no TTFT, no per-row success counts. All characterization from client-side timings only.*
+*No DCGM, no TTFT, no per-request route attribution. Characterization is from client-side timings, HTTP status files, and coarse GPU samples only.*
 
 ---
 

@@ -54,7 +54,7 @@ All claims are scoped to the tested stack and run IDs documented in the full rep
 
 - **Q6 on Ada 400k/2 is operationally viable** for the tested subset (+10–16% slower synthetically, +35–128% on single-run agent scenarios, +7.1 GiB VRAM vs Q4). VRAM headroom narrows to ~5.2 GiB. No quality evaluation was performed: there is no evidence that Q6 produces better outputs.
 
-- **Dual RTX 5090 is a topology probe, not a benchmark.** LiteLLM successfully served benchmark traffic through one endpoint backed by two independent llama.cpp backends. Routing balance reliability, DCGM hardware data, and per-backend metrics were absent from this run.
+- **Dual RTX 5090 is a topology probe, not a benchmark.** LiteLLM served benchmark traffic through one endpoint backed by two independent llama.cpp backends, and private run logs show both GPUs were used. Routing balance reliability, per-request route attribution, DCGM hardware data, and valid per-backend metrics were absent from this run.
 
 - **Agent workloads behave differently from synthetic benchmarks.** GPU utilization shows a bimodal pattern: near-100% during inference, near-zero during tool execution. Scenario wall times include tool call latency and cannot be converted to GPU TPS figures.
 
@@ -196,4 +196,4 @@ When reusing charts, tables, or conclusions, please preserve attribution and avo
 
 ---
 
-*May 2026 · Preliminary research artifact*
+*May 2026 · Technical research report*

@@ -183,9 +183,9 @@ The rising p95 is expected — it tracks increasing context complexity. It is no
 | llama_requests_processing | 1 | 2 | 2 | Mostly 1 active slot between tool calls |
 | llama_requests_deferred | 0 | 0 | 0 | No queuing |
 | decode tok rate (5m rate, t/s) | 40.4 | 51.3 | 55.3 | Comparable to synthetic; agent generates ~1024 tok/turn |
-| prompt tok rate (5m rate, t/s) | 799.1 | 1033.8 | 1033.8 | 2.4–4.5× higher than synthetic — many short tool call prompts |
+| prompt tok rate (5m rate, t/s) | 799.1 | 1033.8 | 1033.8 | Higher than synthetic: p50 799.1 vs 231.6 t/s (~3.4×), p95 1033.8 vs 666.7 t/s (~1.6×) — many short tool call prompts |
 
-The significantly higher prompt token rate in the agent phase (p50 799 vs 231 t/s for synthetic) is a direct signal that the agent generates many short intermediate requests (tool calls, confirmations) compared to the fixed-length synthetic scenarios. This means the prefill engine is churning through many small fills rapidly, leaving the VRAM bandwidth less saturated on average — consistent with the slightly lower mem_copy_util p50 (52% vs 65%).
+The higher prompt token rate in the agent phase (p50 799.1 vs 231.6 t/s for synthetic, ~3.4x) is a signal that the agent generates many short intermediate requests (tool calls, confirmations) compared to the fixed-length synthetic scenarios. This means the prefill engine is processing many small fills rapidly. This is consistent with the lower `MEM_COPY_UTIL` p50 (52% vs 65%), but `MEM_COPY_UTIL` is PCIe DMA copy-engine utilization and does not prove VRAM bandwidth saturation.
 
 ### 5.5 Ada A6000 Runtime Metrics
 
